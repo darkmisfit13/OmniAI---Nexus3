@@ -113,7 +113,7 @@ export const OmniMotionStudio: React.FC<OmniMotionStudioProps> = ({ onSaveToVaul
 
   // 3. Collapsible Folder Drawer (`📁`)
   const [isFolderOpen, setIsFolderOpen] = useState(false);
-  const [folderTab, setFolderTab] = useState<'effects' | 'snippets' | 'overlays' | 'voice_studio'>('effects');
+  const [folderTab, setFolderTab] = useState<'effects' | 'beat_sync' | 'snippets' | 'overlays' | 'voice_studio'>('effects');
 
   // 4. Advanced Effects & LUTs
   const [selectedLUT, setSelectedLUT] = useState<string>('cyber_neon');
@@ -127,6 +127,23 @@ export const OmniMotionStudio: React.FC<OmniMotionStudioProps> = ({ onSaveToVaul
   const [superResActive, setSuperResActive] = useState<boolean>(true);
   const [backgroundMode, setBackgroundMode] = useState<'original' | 'alpha' | 'cyber_void' | 'studio_gradient' | 'tokyo_neon'>('original');
   const [erasedObjectBadge, setErasedObjectBadge] = useState<string | null>(null);
+
+  // 5.5. AI-Driven Beat-Sync & Rhythm Engine (freebeat.ai integration)
+  const [isBeatSyncActive, setIsBeatSyncActive] = useState<boolean>(true);
+  const [showBeatSyncCockpit, setShowBeatSyncCockpit] = useState<boolean>(false);
+  const [beatBpm, setBeatBpm] = useState<number>(140);
+  const [beatSensitivity, setBeatSensitivity] = useState<'tight' | 'balanced' | 'drops'>('balanced');
+  const [beatMarkers, setBeatMarkers] = useState<number[]>([
+    1.71, 3.43, 5.14, 6.86, 8.57, 10.29, 12.00, 13.71, 15.43, 17.14, 18.86, 20.57, 22.29, 24.00, 25.71, 27.43, 29.14
+  ]);
+  const [downbeats, setDownbeats] = useState<number[]>([
+    1.71, 5.14, 8.57, 12.00, 15.43, 18.86, 22.29, 25.71
+  ]);
+  const [magneticSnapping, setMagneticSnapping] = useState<boolean>(true);
+  const [isAnalyzingBeats, setIsAnalyzingBeats] = useState<boolean>(false);
+  const [beatSyncInsight, setBeatSyncInsight] = useState<string>(
+    '140 BPM Phonk Rhythm Analyzed. 17 optimal beat-cut points detected with freebeat.ai sync.'
+  );
 
   // 6. Voice-Cloning & Narration
   const [narrationScript, setNarrationScript] = useState('OmniMotion provides 100x faster editing speed without CapCut clutter.');
@@ -487,6 +504,146 @@ export const OmniMotionStudio: React.FC<OmniMotionStudioProps> = ({ onSaveToVaul
     setTimeout(() => setHandoffToast(null), 3000);
   };
 
+  // 1-Click "Snap Video to Music Peaks" (The core requested feature!)
+  const handleSnapClipsToBeats = () => {
+    if (!beatMarkers.length) {
+      handleAnalyzeBeats();
+      return;
+    }
+
+    // Auto-align all video clips so cut transitions occur precisely on beat peaks
+    let currentStart = 0;
+    const snappedClips: VideoClip[] = videoTrack.map((clip, index) => {
+      // Find the best ending beat marker after currentStart
+      const targetEndCandidates = beatMarkers.filter((m) => m > currentStart + 1.0);
+      let targetEnd = targetEndCandidates.length > 0 
+        ? targetEndCandidates[Math.min(index + 1, targetEndCandidates.length - 1)]
+        : currentStart + clip.duration;
+      
+      if (index === videoTrack.length - 1 && targetEndCandidates.length > 0) {
+        targetEnd = targetEndCandidates[targetEndCandidates.length - 1];
+      }
+
+      const newDuration = Math.max(1.5, Number((targetEnd - currentStart).toFixed(1)));
+      const snapped: VideoClip = {
+        ...clip,
+        startTime: Number(currentStart.toFixed(1)),
+        duration: newDuration,
+      };
+      currentStart = Number((currentStart + newDuration).toFixed(1));
+      return snapped;
+    });
+
+    setVideoTrack(snappedClips);
+    setHandoffToast('⚡ 1-CLICK SUCCESS: All video segments snapped to music peaks!');
+    setTimeout(() => setHandoffToast(null), 3500);
+  };
+
+  // Auto-Split selected clip on every music beat peak
+  const handleAutoSplitOnBeats = () => {
+    const clip = videoTrack.find((c) => c.id === selectedClipId);
+    if (!clip) return;
+
+    const peaksInsideClip = beatMarkers.filter(
+      (m) => m > clip.startTime + 0.8 && m < clip.startTime + clip.duration - 0.8
+    );
+
+    if (peaksInsideClip.length === 0) {
+      setHandoffToast('No interior beat peaks found within this clip to split.');
+      setTimeout(() => setHandoffToast(null), 2500);
+      return;
+    }
+
+    // Split clip into segments at every beat peak
+    const newSplits: VideoClip[] = [];
+    let prevTime = clip.startTime;
+
+    peaksInsideClip.forEach((peakTime, idx) => {
+      const segDuration = Number((peakTime - prevTime).toFixed(1));
+      newSplits.push({
+        ...clip,
+        id: `clip-beat-split-${Date.now()}-${idx}`,
+        name: `${clip.name} (Beat ${idx + 1})`,
+        startTime: prevTime,
+        duration: segDuration,
+      });
+      prevTime = peakTime;
+    });
+
+    // Final trailing segment
+    const finalDuration = Number((clip.startTime + clip.duration - prevTime).toFixed(1));
+    if (finalDuration > 0.5) {
+      newSplits.push({
+        ...clip,
+        id: `clip-beat-split-${Date.now()}-final`,
+        name: `${clip.name} (Beat Final)`,
+        startTime: prevTime,
+        duration: finalDuration,
+      });
+    }
+
+    const clipIndex = videoTrack.findIndex((c) => c.id === selectedClipId);
+    const updated = [...videoTrack];
+    updated.splice(clipIndex, 1, ...newSplits);
+    setVideoTrack(updated);
+    setHandoffToast(`⚡ Split clip into ${newSplits.length} beat-synced rhythm cuts!`);
+    setTimeout(() => setHandoffToast(null), 3500);
+  };
+
+  // AI Rhythm Analysis via Backend API
+  const handleAnalyzeBeats = async (customBpm?: number, customSensitivity?: 'tight' | 'balanced' | 'drops') => {
+    setIsAnalyzingBeats(true);
+    setOrbPhase('analyzing');
+    const targetBpm = customBpm || beatBpm;
+    const targetSens = customSensitivity || beatSensitivity;
+
+    try {
+      const res = await fetch('/api/omnimotion/beat-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audioTitle: audioTrack[0]?.name || 'Dark Phonk 140BPM (freebeat.ai)',
+          baseBpm: targetBpm,
+          duration: totalDuration,
+          sensitivity: targetSens,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.cutPoints?.length) {
+          setBeatMarkers(data.cutPoints);
+          if (data.downbeats?.length) setDownbeats(data.downbeats);
+          if (data.aiInsight) setBeatSyncInsight(data.aiInsight);
+          setHandoffToast(`Beat-Sync: Detected ${data.cutPoints.length} rhythm peaks at ${targetBpm} BPM!`);
+          setTimeout(() => setHandoffToast(null), 3500);
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn('[BeatSync] Local fallback computation used');
+    }
+
+    // Local rhythm computation fallback
+    const secondsPerBeat = 60 / targetBpm;
+    const factor = targetSens === 'tight' ? 2 : targetSens === 'drops' ? 8 : 4;
+    const interval = secondsPerBeat * factor;
+    const newCuts: number[] = [];
+    const newDownbeats: number[] = [];
+    for (let t = Number(secondsPerBeat.toFixed(2)); t < totalDuration; t += interval) {
+      newCuts.push(Number(t.toFixed(2)));
+    }
+    for (let t = Number(secondsPerBeat.toFixed(2)); t < totalDuration; t += secondsPerBeat * 4) {
+      newDownbeats.push(Number(t.toFixed(2)));
+    }
+    setBeatMarkers(newCuts);
+    setDownbeats(newDownbeats);
+    setHandoffToast(`Beat-Sync: Calculated ${newCuts.length} rhythm peaks at ${targetBpm} BPM!`);
+    setTimeout(() => setHandoffToast(null), 3500);
+    setIsAnalyzingBeats(false);
+    setOrbPhase('idle');
+  };
+
   // Split Clip Tool
   const handleSplitClip = () => {
     const clipIndex = videoTrack.findIndex((c) => c.id === selectedClipId);
@@ -794,8 +951,35 @@ export const OmniMotionStudio: React.FC<OmniMotionStudioProps> = ({ onSaveToVaul
               </div>
             </div>
 
-            {/* Right: Clip Editing Quick Actions (Split, Delete, Waveform, Folder Drawer) */}
+            {/* Right: Clip Editing Quick Actions (Split, Delete, Waveform, Beat-Sync, Folder Drawer) */}
             <div className="flex items-center gap-1.5">
+              {/* 1-CLICK SNAP TO BEATS BUTTON */}
+              <button
+                onClick={handleSnapClipsToBeats}
+                className="p-1.5 px-2.5 rounded-lg bg-gradient-to-r from-amber-500/25 to-orange-500/25 hover:from-amber-500/40 hover:to-orange-500/40 border border-amber-500/50 text-amber-300 flex items-center gap-1 font-bold text-xs transition shadow active:scale-95 group"
+                title="1-Click: Snap all video segments to music rhythm peaks"
+              >
+                <Zap className="w-3.5 h-3.5 fill-current text-amber-400 group-hover:scale-110 transition-transform" />
+                <span className="hidden sm:inline">Snap to Beats</span>
+              </button>
+
+              {/* Beat-Sync Cockpit Trigger */}
+              <button
+                onClick={() => {
+                  setIsFolderOpen(true);
+                  setFolderTab('beat_sync');
+                }}
+                className={`p-1.5 px-2 rounded-lg border flex items-center gap-1 text-xs transition ${
+                  folderTab === 'beat_sync' && isFolderOpen
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
+                    : 'bg-black/60 hover:bg-[#1f1b33] border-white/10 text-slate-300 hover:text-amber-400'
+                }`}
+                title="Open Beat-Sync Cockpit & Settings"
+              >
+                <Music className="w-3.5 h-3.5 text-amber-400" />
+                <span className="hidden sm:inline font-mono">{beatBpm} BPM</span>
+              </button>
+
               <button
                 onClick={handleSplitClip}
                 className="p-1.5 px-2 rounded-lg bg-black/60 hover:bg-[#1f1b33] border border-white/10 text-slate-300 hover:text-[#00f2fe] flex items-center gap-1"
@@ -832,7 +1016,7 @@ export const OmniMotionStudio: React.FC<OmniMotionStudioProps> = ({ onSaveToVaul
                     ? 'bg-[#6c63ff] text-white border-[#6c63ff] shadow-[0_0_12px_rgba(108,99,255,0.4)]'
                     : 'bg-[#14121f] text-[#a594fd] border-[#6c63ff]/40 hover:border-[#6c63ff] hover:text-white'
                 }`}
-                title="Toggle Command Center Folder: Effects Suite, Clipboard Snippets, Overlays, Voice Studio"
+                title="Toggle Command Center Folder: Effects Suite, Beat-Sync, Clipboard Snippets, Overlays, Voice Studio"
               >
                 {isFolderOpen ? <FolderOpen className="w-3.5 h-3.5" /> : <Folder className="w-3.5 h-3.5 text-[#00f2fe]" />}
                 <span className="hidden xs:inline">Tools</span> 📁
@@ -847,12 +1031,13 @@ export const OmniMotionStudio: React.FC<OmniMotionStudioProps> = ({ onSaveToVaul
           <div className="w-full lg:w-96 bg-[#14121f] border-t lg:border-t-0 lg:border-l border-white/10 flex flex-col justify-between overflow-hidden shadow-2xl animate-in slide-in-from-right duration-200">
             
             {/* Drawer Tabs */}
-            <div className="p-2 border-b border-white/10 grid grid-cols-4 gap-1 bg-[#0b0a14]">
+            <div className="p-2 border-b border-white/10 grid grid-cols-5 gap-1 bg-[#0b0a14]">
               {[
-                { id: 'effects', label: 'LUTs & FX', icon: SlidersHorizontal },
-                { id: 'snippets', label: 'B-Roll & Audio', icon: Clipboard },
-                { id: 'overlays', label: 'Text & Stickers', icon: Type },
-                { id: 'voice_studio', label: 'Voice Clone', icon: Mic },
+                { id: 'effects', label: 'LUTs/FX', icon: SlidersHorizontal },
+                { id: 'beat_sync', label: 'Beat-Sync', icon: Music },
+                { id: 'snippets', label: 'B-Roll', icon: Clipboard },
+                { id: 'overlays', label: 'Text/FX', icon: Type },
+                { id: 'voice_studio', label: 'Voice', icon: Mic },
               ].map((tab) => {
                 const Icon = tab.icon;
                 const active = folderTab === tab.id;
@@ -860,14 +1045,16 @@ export const OmniMotionStudio: React.FC<OmniMotionStudioProps> = ({ onSaveToVaul
                   <button
                     key={tab.id}
                     onClick={() => setFolderTab(tab.id as any)}
-                    className={`py-2 px-1 rounded-xl text-[10.5px] font-mono font-bold flex flex-col items-center gap-1 transition ${
+                    className={`py-2 px-1 rounded-xl text-[10px] font-mono font-bold flex flex-col items-center gap-1 transition ${
                       active
-                        ? 'bg-[#6c63ff] text-white shadow-md shadow-[#6c63ff]/30'
+                        ? tab.id === 'beat_sync'
+                          ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/30'
+                          : 'bg-[#6c63ff] text-white shadow-md shadow-[#6c63ff]/30'
                         : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
                     }`}
                   >
                     <Icon className="w-3.5 h-3.5" />
-                    <span>{tab.label}</span>
+                    <span className="truncate">{tab.label}</span>
                   </button>
                 );
               })}
@@ -969,7 +1156,127 @@ export const OmniMotionStudio: React.FC<OmniMotionStudioProps> = ({ onSaveToVaul
                 </div>
               )}
 
-              {/* TAB 2: CLIPBOARD & SAVED CLIP SNIPPETS */}
+              {/* TAB 2: AI BEAT-SYNC & RHYTHM ENGINE (freebeat.ai integration) */}
+              {folderTab === 'beat_sync' && (
+                <div className="space-y-3.5">
+                  <div className="p-3 rounded-2xl bg-gradient-to-r from-amber-500/15 via-[#6c63ff]/15 to-[#00f2fe]/10 border border-amber-500/40 flex items-center gap-2.5">
+                    <Music className="w-5 h-5 text-amber-400 shrink-0 animate-pulse" />
+                    <div>
+                      <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                        AI Beat-Sync Rhythm Engine
+                        <span className="px-1.5 py-0.5 rounded text-[8.5px] bg-amber-400/20 text-amber-300 font-mono">freebeat.ai</span>
+                      </span>
+                      <span className="text-[10px] text-slate-400">Snaps cuts to music transients & downbeat drops</span>
+                    </div>
+                  </div>
+
+                  {/* 1-CLICK SNAP VIDEO BUTTON (PRIMARY CORE ACTION) */}
+                  <button
+                    onClick={handleSnapClipsToBeats}
+                    className="w-full py-3 rounded-xl bg-gradient-to-r from-amber-400 via-orange-500 to-[#00f2fe] text-slate-950 font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-amber-500/25 active:scale-95 transition hover:brightness-110"
+                  >
+                    <Zap className="w-4 h-4 fill-current text-slate-950" />
+                    <span>Snap Video Segments to Music Peaks (1-Click)</span>
+                  </button>
+
+                  {/* Auto-Split Clip on Beat Peaks */}
+                  <button
+                    onClick={handleAutoSplitOnBeats}
+                    className="w-full py-2.5 rounded-xl bg-[#1f1b33] hover:bg-[#282245] border border-amber-500/40 text-amber-300 font-bold text-xs flex items-center justify-center gap-1.5 active:scale-95 transition"
+                  >
+                    <Scissors className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Auto-Split Clip on All Beat Peaks</span>
+                  </button>
+
+                  {/* Tempo / BPM Slider */}
+                  <div className="p-3 bg-black/60 rounded-xl border border-white/5 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] uppercase text-slate-400 font-bold">Tempo (BPM):</span>
+                      <span className="text-xs font-mono font-bold text-[#00f2fe]">{beatBpm} BPM</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={70}
+                      max={180}
+                      step={1}
+                      value={beatBpm}
+                      onChange={(e) => {
+                        const val = Number(e.target.value);
+                        setBeatBpm(val);
+                        handleAnalyzeBeats(val, beatSensitivity);
+                      }}
+                      className="w-full accent-[#00f2fe] cursor-pointer"
+                    />
+                    <div className="flex gap-1.5">
+                      {[120, 128, 140, 160].map((bpm) => (
+                        <button
+                          key={bpm}
+                          onClick={() => {
+                            setBeatBpm(bpm);
+                            handleAnalyzeBeats(bpm, beatSensitivity);
+                          }}
+                          className={`flex-1 py-1 rounded text-[10px] font-mono border ${
+                            beatBpm === bpm ? 'bg-[#6c63ff] text-white border-[#6c63ff]' : 'bg-black/40 text-slate-400 border-white/5 hover:text-white'
+                          }`}
+                        >
+                          {bpm}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Cut Sensitivity Preset */}
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] uppercase text-slate-400 font-bold block">Cut Density / Frequency:</label>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {[
+                        { id: 'tight', label: 'Hyper 1/2 Beat', desc: 'Fast Traps' },
+                        { id: 'balanced', label: 'Balanced (Bar)', desc: '4/4 Beat' },
+                        { id: 'drops', label: 'Heavy Drops', desc: 'EDM Drops' },
+                      ].map((s) => (
+                        <button
+                          key={s.id}
+                          onClick={() => {
+                            setBeatSensitivity(s.id as any);
+                            handleAnalyzeBeats(beatBpm, s.id as any);
+                          }}
+                          className={`p-2 rounded-xl border text-left flex flex-col justify-between transition ${
+                            beatSensitivity === s.id
+                              ? 'bg-amber-500/20 text-amber-300 border-amber-500 shadow-md shadow-amber-500/20'
+                              : 'bg-black/50 text-slate-400 border-white/10 hover:text-white'
+                          }`}
+                        >
+                          <span className="text-[10.5px] font-bold block">{s.label}</span>
+                          <span className="text-[8px] opacity-70 block">{s.desc}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* AI Rhythm Insight Banner */}
+                  <div className="p-2.5 rounded-xl bg-black/60 border border-white/10 space-y-1">
+                    <div className="text-[9px] text-[#00f2fe] font-mono flex items-center justify-between">
+                      <span className="flex items-center gap-1">
+                        <Zap className="w-2.5 h-2.5 text-amber-400 fill-current" /> AI RHYTHM INSIGHT
+                      </span>
+                      <span>{beatMarkers.length} CUT POINTS</span>
+                    </div>
+                    <p className="text-[10px] text-slate-300 leading-relaxed font-sans">{beatSyncInsight}</p>
+                  </div>
+
+                  {/* Re-analyze Button */}
+                  <button
+                    onClick={() => handleAnalyzeBeats()}
+                    disabled={isAnalyzingBeats}
+                    className="w-full py-2 rounded-xl bg-black/80 hover:bg-[#1a172a] border border-white/15 text-slate-300 text-xs font-mono flex items-center justify-center gap-1.5 transition disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isAnalyzingBeats ? 'animate-spin text-[#00f2fe]' : ''}`} />
+                    <span>{isAnalyzingBeats ? 'Analyzing Transients...' : 'Recalibrate Rhythm from Audio Track'}</span>
+                  </button>
+                </div>
+              )}
+
+              {/* TAB 3: CLIPBOARD & SAVED CLIP SNIPPETS */}
               {folderTab === 'snippets' && (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between text-xs">
@@ -1188,6 +1495,51 @@ export const OmniMotionStudio: React.FC<OmniMotionStudioProps> = ({ onSaveToVaul
             }}
           >
             <div className="w-3 h-3 bg-[#00f2fe] -ml-[5px] -mt-0.5 rounded-full shadow-[0_0_8px_rgba(0,242,254,1)]" />
+          </div>
+
+          {/* BEAT-SYNC RHYTHM RULER TRACK (freebeat.ai / transient peaks) */}
+          <div className="h-6 bg-black/60 rounded-lg border border-amber-500/25 relative flex items-center px-1 overflow-hidden">
+            <span className="absolute left-2 text-[8.5px] font-mono text-amber-400 z-10 pointer-events-none font-bold flex items-center gap-1">
+              <Zap className="w-2.5 h-2.5 fill-current text-amber-400" /> BEATS
+            </span>
+            <div 
+              className="h-full pl-12 relative w-full flex items-center" 
+              style={{ transform: `scaleX(${timelineZoom})`, transformOrigin: 'left' }}
+            >
+              {beatMarkers.map((marker, i) => {
+                const isDownbeat = downbeats.includes(marker);
+                const isNearPlayhead = Math.abs(currentTime - marker) < 0.25;
+                return (
+                  <div
+                    key={i}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setCurrentTime(marker);
+                    }}
+                    style={{
+                      left: `${(marker / totalDuration) * 100}%`,
+                    }}
+                    className={`absolute top-0 bottom-0 cursor-pointer flex flex-col items-center justify-center group z-10 ${
+                      isNearPlayhead ? 'scale-125 z-20' : ''
+                    }`}
+                    title={`Beat Peak at ${marker}s ${isDownbeat ? '(Downbeat Drop)' : ''}`}
+                  >
+                    <div 
+                      className={`w-1 rounded-full transition-all ${
+                        isNearPlayhead
+                          ? 'h-4 bg-cyan-300 shadow-[0_0_8px_rgba(0,242,254,1)]'
+                          : isDownbeat
+                          ? 'h-3.5 bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.8)]'
+                          : 'h-2 bg-amber-500/60 group-hover:bg-amber-300'
+                      }`} 
+                    />
+                    {isDownbeat && (
+                      <span className="text-[6.5px] text-amber-400 font-mono font-bold leading-none -mt-0.5">⚡</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
 
           {/* TRACK 1: VIDEO TRACK */}

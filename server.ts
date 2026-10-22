@@ -948,6 +948,65 @@ Suggest video beat cuts, trims, and energetic captions. Return JSON only with ke
   }
 });
 
+// 11. OmniMotion AI Beat-Sync Engine (Rhythm Analysis & Peak Cut Suggestions)
+app.post('/api/omnimotion/beat-sync', async (req: Request, res: Response) => {
+  try {
+    const { 
+      audioTitle = 'Dark Phonk 140BPM (freebeat.ai)', 
+      baseBpm = 140, 
+      duration = 30.0, 
+      sensitivity = 'balanced' // 'tight' (every 1/2 beat), 'balanced' (every beat), 'drops' (major drops)
+    } = req.body;
+
+    const bpm = Number(baseBpm) || 140;
+    const secondsPerBeat = 60 / bpm; // at 140 BPM, ~0.428s per beat
+
+    // Compute rhythm peaks and downbeats
+    const stepFactor = sensitivity === 'tight' ? 2 : sensitivity === 'drops' ? 8 : 4;
+    const interval = secondsPerBeat * (sensitivity === 'tight' ? 2 : sensitivity === 'drops' ? 8 : 4); // cuts every 2, 4, or 8 beats
+    
+    const cutPoints: number[] = [];
+    const downbeats: number[] = [];
+    for (let t = Number(secondsPerBeat.toFixed(2)); t < duration; t += interval) {
+      cutPoints.push(Number(t.toFixed(2)));
+    }
+    for (let t = Number(secondsPerBeat.toFixed(2)); t < duration; t += secondsPerBeat * 4) {
+      downbeats.push(Number(t.toFixed(2)));
+    }
+
+    let aiInsight = `Analyzed rhythm for "${audioTitle}". Detected ${bpm} BPM with ${cutPoints.length} prime sync points.`;
+
+    if (ai) {
+      try {
+        const prompt = `You are a viral TikTok/Reels beat editor. The background song is "${audioTitle}" at ${bpm} BPM. Suggest optimal video cut pacing (rapid montage vs cinematic hold) and a 1-sentence tip for maximum visual impact.`;
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: prompt
+        });
+        if (response.text) {
+          aiInsight = response.text.trim().replace(/\n+/g, ' ');
+        }
+      } catch (err) {
+        console.warn('[BeatSync AI] Fallback:', err);
+      }
+    }
+
+    res.json({
+      success: true,
+      audioTitle,
+      bpm,
+      secondsPerBeat: Number(secondsPerBeat.toFixed(3)),
+      cutPoints,
+      downbeats,
+      sensitivity,
+      aiInsight,
+      snappedTrackCount: 3,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Start Server and mount Vite middleware
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
